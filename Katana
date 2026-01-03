@@ -1,0 +1,291 @@
+***** LOCALSCRIPT (inside of katana tool) *****
+
+
+-- Defining required services and variables
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local tool = script.Parent
+local handle = tool.Wield
+local anims = ReplicatedStorage.Animations
+local events = ReplicatedStorage.Events
+
+local player = Players.LocalPlayer
+local char = player.Character or player.CharacterAdded:Wait()
+local cam = workspace.Camera
+local mouse = player:GetMouse()
+
+local loadedAnims = {}
+local m1Combo = 1
+local m1ComboMax = 4
+local aDebounce = false
+local canHeavy = false
+local parried = false
+local equipped
+
+local function LoadAnimations()
+  -- Loading animations from a folder in ReplicatedStorage in a way they can be easily called
+	local hum: Humanoid = char:WaitForChild("Humanoid")
+	local animator: Animator = hum:WaitForChild("Animator")
+	
+	for _, anim: Animation in pairs(anims.Katana:GetChildren()) do
+		loadedAnims[anim.Name] = animator:LoadAnimation(anim) 
+	end
+end
+
+function Shiftlock(active)
+  -- Making it lock the players mouse and camera for when the katana is equipped
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChild("Humanoid")
+	
+	if active then
+		hum.AutoRotate = false
+		hum.CameraOffset = Vector3.new(1.75,0,0)
+		game:GetService("RunService"):BindToRenderStep("ShiftLock", Enum.RenderPriority.Character.Value, function()
+			game:GetService("UserInputService").MouseBehavior = Enum.MouseBehavior.LockCenter 
+			local _, y = workspace.CurrentCamera.CFrame.Rotation:ToEulerAnglesYXZ() 
+			hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0,y,0) 
+		end) 
+	else
+		hum.AutoRotate = true 
+		hum.CameraOffset = Vector3.new(0,0,0) 
+		RunService:UnbindFromRenderStep("ShiftLock") 
+		UIS.MouseBehavior = Enum.MouseBehavior.Default
+	end
+end
+
+player.CharacterAdded:Connect(LoadAnimations)
+
+tool.Equipped:Connect(function()
+  Starting idle animation and changing variables since the tool was equipped
+	loadedAnims["Idle"]:Play()
+	equipped = true
+	Shiftlock(true)
+end)
+
+tool.Unequipped:Connect(function()
+-- Stopping animations from playing and changing variables since the tool has been unequipped
+	for _, anim: AnimationTrack in pairs(loadedAnims) do
+		anim:Stop()
+	end
+	equipped = false
+	Shiftlock(false)
+end)
+
+tool.Activated:Connect(function()
+-- Checking for a cooldown on the katana's m1 attack
+	if not aDebounce then
+		aDebounce = true
+
+    -- Finding the animation through the previously created table of animations
+		local anim: AnimationTrack = loadedAnims["M1-" .. m1Combo]
+		
+		task.spawn(function()
+      -- Waiting for the moment in the animation where they strike the opponent, then firing to the server to check for hits (the argument 1 means its an m1)
+			anim:GetMarkerReachedSignal("Swing"):Wait()
+			events.SwingWeapon:FireServer(1)
+		end)
+
+    -- Changing combo variable
+		m1Combo = math.clamp(m1Combo + 1, 1, m1ComboMax + 1)
+
+		if m1Combo == (m1ComboMax + 1) then
+			m1Combo = 1
+		end
+		
+		task.spawn(function()
+      -- Checking to see if the player swung in the last 1.25s, and if not then resetting the combo
+			local oldm1Combo = m1Combo
+			task.wait(1.25)
+			if m1Combo == oldm1Combo then
+				m1Combo = 1
+			end
+		end)
+
+		if anim then
+			anim:Play()
+      -- Creating wait times depending on the situation (making it so you can't m2 in the middle of an m1 as well)
+			if m1Combo ~= 1 then
+				task.wait(anim.Length - (anim.Length*.1))
+			else
+				canHeavy = true
+				task.wait(anim.Length - (anim.Length*.1)+1.25)
+			end
+			if not parried then
+				aDebounce = false
+			end
+		else
+			if not parried then
+				aDebounce = false
+			end
+		end
+	end
+end)
+
+mouse.Button2Down:Connect(function()
+  -- Checking if tool is equipped and not in the middle of m1 attack, also checking if m2 attack is ready (canHeavy)
+	if equipped and (not aDebounce or canHeavy) then
+		canHeavy = false
+		aDebounce = true
+		local anim: AnimationTrack = loadedAnims["M2-1"]
+		anim:Play()
+		
+		task.spawn(function()
+			anim:GetMarkerReachedSignal("Swing"):Wait()
+			events.SwingWeapon:FireServer(2)
+		end)
+
+    -- Heavy attacks have longer cooldown
+		task.wait(anim.Length + .25)
+		aDebounce = false
+	end
+end)
+
+UIS.InputBegan:Connect(function(input, gpe)
+	if not gpe then
+		if input.KeyCode == Enum.KeyCode.F and not aDebounce then
+      -- Playing parry animation and enabling attack cooldown while parrying
+			aDebounce = true
+			loadedAnims.Parry:Play()
+			loadedAnims.Parry.Ended:Wait()
+			aDebounce = false
+		end
+	end
+end)
+
+events.ParryWeapon.OnClientEvent:Connect(function()
+	parried = true
+  -- Cancelling the playing attack animation, so they don't keep swinging after being parried
+	local toCancel = loadedAnims["M1-"..m1Combo-1]
+	if not toCancel then
+		toCancel = loadedAnims["M1-"..m1ComboMax]
+	end
+	toCancel:Stop()
+	aDebounce = true
+	task.wait(1)
+	aDebounce = false
+	parried = false
+end)
+
+LoadAnimations()
+
+
+***** SERVERSCRIPT *****
+
+
+-- Calling required services and variables
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local Debris = game:GetService("Debris")
+
+local events = ReplicatedStorage.Events
+local configurations = ReplicatedStorage.Configurations
+
+game.Players.PlayerAdded:Connect(function(plr)			
+	plr.CharacterAdded:Connect(function(char)	
+    -- Creating player hitbox
+		local hrp: BasePart = char:WaitForChild("HumanoidRootPart")
+		
+		local hitbox = Instance.new("Part", char)
+		hitbox.Name = "Hitbox"
+		hitbox.Size = Vector3.new(4, 6, 2)
+		hitbox.Transparency = 1
+		hitbox.CanCollide = false
+		hitbox.CFrame = hrp.CFrame
+
+    -- Welding hitbox to the player
+		local wc = Instance.new("WeldConstraint", hrp)
+		wc.Part0 = hrp
+		wc.Part1 = hitbox
+
+    -- Creating a motor6D for the katana so that it is animatable
+		local md = Instance.new("Motor6D", char.RightHand)
+		md.Part0 = char.RightHand
+		md.Name = "ToolGrip"
+
+    -- Waiting for the katana to be equipped and welding to hand
+		char.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") and child:FindFirstChild("BodyAttach") then
+				md.Part1 = child.BodyAttach
+			end
+		end)
+
+    -- Putting my own animate script inside of the character for custom walk, run, idle
+		task.wait(.1)
+		if char:FindFirstChild("Animate") then
+			char.Animate:Destroy()
+			script.ImprovedAnimate:Clone().Parent = char
+		end
+	end)
+end)
+
+events.SwingWeapon.OnServerEvent:Connect(function(player: Player, attackType)
+	local char = player.Character
+	if char then
+		local weapon = char:FindFirstChildOfClass("Tool")
+		local hb: BasePart = weapon:FindFirstChild("Hitbox")
+		local weaponConfig = require(configurations[weapon.Name])
+    -- Defining a variable for a function to be connected and cancelled
+		local c: RBXScriptConnection
+		if weapon and hb then
+      -- Playing swing sound
+			if weapon:FindFirstChild("Swing") then
+				weapon.Swing:Play()
+			end
+			local hits = {}
+			c = hb.Touched:Connect(function(hit)
+        -- Making sure we hit the hitbox
+				if hit.Name == "Hitbox" then
+					local eChar: Model = hit.Parent
+					local eHum: Humanoid = eChar:FindFirstChild("Humanoid")
+          -- Checking to make sure we aren't detecting the same player twice
+					if not hits[eChar] then
+						hits[eChar] = true
+            -- Making sure they aren't parrying
+						if not eChar:FindFirstChild("Parrying") then
+							if attackType == 1 then
+								weapon.Hit:Play()
+								eHum:TakeDamage(weaponConfig.m1Damage)
+							elseif attackType == 2 then
+								weapon.Hit:Play()
+								eHum:TakeDamage(weaponConfig.m2Damage)
+							end
+						else
+							if weapon:FindFirstChild("Parry") then
+                -- If they are parrying and it's an m1, then let the client know and play sound effect
+								if attackType == 1 then
+									weapon.Parry:Play()
+									events.ParryWeapon:FireClient(player)
+								elseif attackType == 2 then
+                -- If it's an m2 then hit them anyways but nerf the damage lightly
+									weapon.Parry:Play()
+									weapon.Hit:Play()
+									eHum:TakeDamage(weaponConfig.m2Damage - 5)
+								end
+							end
+						end
+					end
+				end
+			end)
+      -- Wait, then disconnect the hit function to stop it from detecting any unnessecary hits
+			task.wait(.4)
+			c:Disconnect()
+		end
+	end
+end)
+
+-- Creating a way for the server to detect a parry when it is used by the client
+events.ParryWeapon.OnServerEvent:Connect(function(player: Player)
+	local char = player.Character
+	if char then
+		local weapon = char:FindFirstChildOfClass("Tool")
+		if weapon then
+			local parrying = Instance.new("BoolValue", char)
+			parrying.Name = "Parrying"
+			Debris:AddItem(parrying, .3)
+		end
+	end
+end)
