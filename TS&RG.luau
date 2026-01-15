@@ -1,5 +1,4 @@
 -- Defining useful services
-
 local RunService = game:GetService("RunService")
 local PlayerService = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -7,15 +6,12 @@ local TweenService = game:GetService("TweenService")
 
 local Events = ReplicatedStorage.Events
 
--- Defining customizable variables I may want to change later
-
+-- Settings
 local gridSize = Vector3.new(4, 0, 4)
 local roomSize = Vector3.new(20, 0, 20)
 local tickSpeed = 2
 local pathsGenerated = 3
 local enemiesGenerated = 2
-
--- Used for raycasting wall checks later
 
 local wallOffsets = {
 	Vector3.new((roomSize.X / 2), 5, 0);
@@ -30,7 +26,6 @@ local tickInputs = {}
 local enemies = {}
 
 -- Made this function so I don't have to repeat code creating parts
-
 local function BuildWall(size: Vector3)
 	local wall = Instance.new("Part")
 	wall.Anchored = true
@@ -41,7 +36,6 @@ local function BuildWall(size: Vector3)
 end
 
 -- Same as BuildWall function
-
 local function CreateEnemy(position: Vector3)
 	local enemy = Instance.new("Part")
 	enemy.Anchored = true
@@ -52,14 +46,15 @@ local function CreateEnemy(position: Vector3)
 	enemy.Color = Color3.fromRGB(255, 0, 0)
 	enemy.Material = Enum.Material.Neon
 	enemy.Position = position
+    
 	local GridPosition = Instance.new("Vector3Value", enemy)
 	GridPosition.Name = "GridPosition"
 	GridPosition.Value = position
+    
 	table.insert(enemies, enemy)
 end
 
 -- Function for checking what is around a grid space
-
 local function GetNeighbors(pos)
 	-- Creating a table for the positions I want to check relative to the grid space (right, left, foward, backward)
 	local neighbors = {
@@ -181,130 +176,6 @@ local function ApplyMovement(enemy, nextPos)
 	end
 end
 
-local function GenerateRooms()
-	-- Generating usually takes a few seconds, so we let clients know that we're generating a maze for them
-	Events.ChangeText:FireAllClients("Generating...")
-	-- Clean up from whatever was there before
-	workspace.Walls:ClearAllChildren()
-
-	-- Same here
-	for _, enemy: BasePart in workspace.Characters:GetChildren() do
-		if enemy.Name == "Enemy" then
-			enemy:Destroy()
-		end
-	end
-
-	-- Setting the spawn and end locations
-	workspace.SpawnLocation.Position = floor.Position - Vector3.new(floor.Size.X / 2, -floor.Size.Y / 2, floor.Size.Z / 2) + roomSize / 2
-	
-	local startPosition = workspace.SpawnLocation.Position - Vector3.new(0, 1, 0)
-	local endPosition = startPosition + (workspace.Baseplate.Size * Vector3.new(1, 0, 1)) - roomSize
-	workspace.WinPad.Position = endPosition + Vector3.new(0, 3, 0)
-
-	for i = 1, (floor.Size.X / roomSize.X), 1 do -- Looping through columns of rooms
-		for p = 1, (floor.Size.Z / roomSize.Z), 1 do -- Looping through each room in each column
-			local roomPosition = startPosition + Vector3.new((i - 1) * roomSize.X, 0, (p - 1) * roomSize.Z) -- Getting the position of the current iteration by multiplying the room size by number of columns and rooms (i and p)
-			local doors = 0
-			local wall: BasePart
-			
-			repeat
-				for s, offset in wallOffsets do -- To check every neighbor
-					if s == 2 or s == 4 then -- Building wall vertically or horizontally depending on the position relative to the space it will be placed (could rotate the wall alternatively)
-						wall = BuildWall(Vector3.new(roomSize.X, 10, 1))
-					else
-						wall = BuildWall(Vector3.new(1, 10, roomSize.Z))
-					end
-
-					wall.CFrame = CFrame.new(roomPosition + offset)
-
-					-- Other logic could be used here, but I calculated it using trigonometry
-					-- I'm getting the adjacent side length of a right triangle using the distance between the center of the floor and the point we want to create a door in order to check if it's
-					-- less than half the length of the floor. This is to check if it is an outer wall, and if it is then we don't want a door there because they will fall out of the world. Using the
-					-- distance between the floor and the wall position itself doesn't work because the length is longer diagnolly than horizontally. If the floor were a circle then it would work.
-					local hyp = (floor.Position - (roomPosition + offset)).Magnitude
-					local opp = (floor.Position.Z - (roomPosition + offset).Z)
-					local rad = math.asin(opp/hyp) -- Getting angle in radians
-					local adj1 = hyp * math.cos(rad) -- Calculating adjacent length
-
-					opp = (floor.Position.X - (roomPosition + offset).X) -- Have to do it a second time because we can't ignore the other dimension, otherwise we are only checking if it's a wall on the outside
-					-- on the z axis and completely ignoring if it is on the x axis.
-					rad = math.asin(opp/hyp)
-					local adj2 = hyp * math.cos(rad)
-
-					if adj1 < floor.Size.X / 2 and adj2 < floor.Size.X / 2 then -- Check if it's an outside wall
-						if math.random(1, 3) == 1 and doors < 3 then -- 1/3 chance for it to be a door
-							for _, wall: BasePart in workspace.Walls:GetChildren() do
-								if wall.Position == roomPosition + offset then -- Finding the right part
-									-- Make it into a door
-									wall.Size = Vector3.new(wall.Size.X, 2, wall.Size.Z)
-									wall.Position += Vector3.new(0, 4, 0)
-								end
-							end
-							doors += 1
-						end
-					end
-				end
-				task.wait() -- Performance (Don't wanna crash the game)
-			until doors > 0 -- Want at least one door so most spaces are accessible
-		end
-	end
-	
-	local foundExit = false
-	local searches = 0
-	local visited = {}
-
-	-- Function to check if the maze is even possible
-	local function searchRoom(roomPosition: Vector3)
-		if visited[tostring(roomPosition)] then return end -- If already checked then return
-		
-		visited[tostring(roomPosition)] = true
-		
-		if roomPosition == startPosition then
-			searches = 0
-		end
-		
-		searches += 1
-		
-		if roomPosition == endPosition then
-			foundExit = true
-			return
-		end -- If we found the exit then we were successful and can return
-		
-		for i, offset in wallOffsets do
-			if i < 3 then -- Only have to check up and right for other spaces logically (performance)
-				local foundWall = false
-				
-				if workspace:Raycast(roomPosition, (offset * Vector3.new(1, 0, 1))) then
-					foundWall = true
-				end
-
-				if not foundWall and (floor.Position - roomPosition).Magnitude < floor.Size.X  and searches < 50 then -- If we don't find a wall and were still inside of the maze then it's an open space and we can search it
-					-- (Keep it less than 50 searches for performance)
-					searchRoom(roomPosition + Vector3.new(offset.X * 2, 0, offset.Z * 2))
-				end
-			end
-		end
-	end
-	
-	searchRoom(startPosition) -- Start the search
-	
-	if not foundExit then
-		task.wait()
-		GenerateRooms() -- If we don't find an exit then regenerate the maze
-	else
-		Events.Ticks.Value = 0
-		
-		for i = 1, enemiesGenerated, 1 do
-			-- Generating a random room for the enemy to spawn in, then spawning them there (minimum 3 so they aren't too close to the player)
-			local numberOfColumns = (floor.Size.X / roomSize.X)
-			local pos = startPosition + Vector3.new(roomSize.X * (math.random(3, numberOfColumns) - 1), 3, (roomSize.Z * (math.random(3, numberOfColumns) - 1)))
-			CreateEnemy(pos)
-		end
-		
-		Events.GameStarted:FireAllClients()
-	end
-end
-
 local function OnCharacterAdded(character: Model)
 	-- Setting up character
 	character.Parent = workspace.Characters
@@ -370,7 +241,7 @@ RunService.Heartbeat:Connect(function()
 					target = target.Character.HumanoidRootPart
 					
 					if tickInputs[enemy] and table.find(tickInputs[enemy], "inAction") then -- If the enemy is in action then they are unable to move
-						return
+						continue -- Switched from return to continue to allow other enemies to process
 					end
 					
 					if math.random(1, 10) <= 3 then -- To make the AI a little dumber, they forget to move a space 30% of the time
